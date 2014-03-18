@@ -1,108 +1,145 @@
 ﻿using System;
-using System.Configuration;
-using System.IO.Ports;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
+using System.Collections;
+using System.ComponentModel;
+using System.Configuration.Install;
+using System.ServiceProcess;
+
+using ReefAngelTCPRelay;
+
 
 
 namespace TCPToSerialRelay
 {
+
+    [RunInstaller(true)]
+    public sealed class MyServiceInstallerProcess : ServiceProcessInstaller
+    {
+        public MyServiceInstallerProcess()
+        {
+            this.Account = ServiceAccount.NetworkService;
+        }
+    }
+
+    [RunInstaller(true)]
+    public sealed class MyServiceInstaller : ServiceInstaller
+    {
+        public MyServiceInstaller()
+        {
+            this.Description = "ReefAngel TCP to USB Relay";
+            this.DisplayName = "ReefAngel TCP Relay";
+            this.ServiceName = "ReefAngelTCPRelayService";
+            this.StartType = System.ServiceProcess.ServiceStartMode.Automatic;
+            
+        }
+    }
+
+    
+
     internal class Program
     {
-        private static Socket tcpListener;
-        private static SocketPermission permission;
-        private static Socket tcpSocket;
-        private static IPEndPoint ipEndPoint;
-        private static SerialPort serialPort;
-
-        private static void OnSerialPortData(object sender, SerialDataReceivedEventArgs e)
-        {
-            var data = serialPort.ReadExisting();
-            try
-            {
-                tcpSocket.Send(Encoding.UTF8.GetBytes(data));
-            
-            }
-            catch (Exception)
-            {
-                Console.WriteLine(data);                
-             
-            }
-
-        }
-
-        private static void OnTCPAcceptEvent(IAsyncResult res)
-        {
-            var listener = (Socket)res.AsyncState;
-            tcpSocket = listener.EndAccept(res);
-
-            var buffer = new byte[1024];
-            var obj = new object[2];
-            obj[0] = buffer;
-            obj[1] = tcpSocket;
-
-            tcpSocket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, OnTCPReceiveEvent,obj);
-            AsyncCallback aCallback = OnTCPAcceptEvent;
-            listener.BeginAccept(aCallback, listener); 
-        }
-
-        private static void OnTCPReceiveEvent(IAsyncResult res)
+    
+        static void Install(bool undo, string[] args)
         {
             try
-            {                
-                var obj = new object[2];
-                obj = (object[])res.AsyncState;
-
-                byte[] buffer = (byte[])obj[0];
-                tcpSocket = (Socket)obj[1];
-
-                var data = string.Empty;
-
-                int bytesRead = tcpSocket.EndReceive(res);
-
-                if (bytesRead > 0)
+            {
+                Console.WriteLine(undo ? "uninstalling" : "installing");
+                using (AssemblyInstaller inst = new AssemblyInstaller(typeof(Program).Assembly, args))
                 {
-                    data += Encoding.ASCII.GetString(buffer, 0,bytesRead);
-
-                    byte[] newBuffer = new byte[1024];
-                    obj[0] = newBuffer;
-                    obj[1] = tcpSocket;
-                    tcpSocket.BeginReceive(newBuffer, 0, newBuffer.Length, SocketFlags.None, OnTCPReceiveEvent, obj);
-                 
-                    serialPort.Write(data);
+                    IDictionary state = new Hashtable();
+                    inst.UseNewContext = true;
+                    try
+                    {
+                        if (undo)
+                        {                            
+                            inst.Uninstall(state);
+                        }
+                        else
+                        {
+                            inst.Install(state);
+                            inst.Commit(state);
+                        }
+                    }
+                    catch
+                    {
+                        try
+                        {
+                            inst.Rollback(state);                            
+                        }
+                        catch { }
+                        throw;
+                    }
                 }
             }
-            catch (Exception ex) { Console.WriteLine(ex.ToString()); }
-        } 
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+            }
+        }
 
+     
         private static void Main(string[] args)
         {
-            var tcpPort = Convert.ToInt32(ConfigurationManager.AppSettings["tcpPort"]);
 
-            permission = new SocketPermission(NetworkAccess.Accept, TransportType.Tcp, "", tcpPort);
-            permission.Demand();
-            var IPHostEntry = Dns.GetHostEntry("");
-            var ipAddr = IPHostEntry.AddressList[1];
-            ipEndPoint = new IPEndPoint(ipAddr, tcpPort);
-            tcpListener = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-
-            tcpListener.Bind(ipEndPoint);
-            tcpListener.Listen(5);
-
-            AsyncCallback aCallback = OnTCPAcceptEvent;
-            tcpListener.BeginAccept(aCallback, tcpListener);
-
-            serialPort = new SerialPort();
-            serialPort.PortName = ConfigurationManager.AppSettings["comPort"].ToString();
-            serialPort.BaudRate = Convert.ToInt32(ConfigurationManager.AppSettings["comBaud"]);
-            serialPort.DataReceived += OnSerialPortData;
-            serialPort.Open();
-            if (serialPort.IsOpen)
+            bool install = false, uninstall = false, console = false, rethrow = false;
+            #  if DEBUG
+                console=true;
+            #endif
+            try
             {
-                Console.WriteLine("opened port");
+                foreach (string arg in args)
+                {
+                    switch (arg)
+                    {
+                        case "-i":
+                        case "-install":
+                            install = true; break;
+                        case "-u":
+                        case "-uninstall":
+                            uninstall = true; break;
+                        case "-c":
+                        case "-console":
+                            console = true; break;
+                        default:
+                            console = true;                            
+                            break;
+                    }
+                }
+
+                if (uninstall)
+                {
+                    Install(true, args);
+                }
+                if (install && !console && !uninstall)
+                {
+                    Install(false, args);
+                    ServiceController sc = new ServiceController();
+                    sc.ServiceName = "ReefAngelTcpRelayService";
+                    sc.Start();
+                }
+                if (console)
+                {
+                    ReefAngelTCPRelayApp app = new ReefAngelTCPRelayApp();
+                    Console.WriteLine("Starting...");
+                    app.Startup();
+                    Console.WriteLine("System running; press any key to stop");
+                    Console.ReadKey(true);
+                    app.Shutdown();
+                    Console.WriteLine("System stopped");
+                }
+                else 
+                {
+                    rethrow = true; // so that windows sees error...
+                    ServiceBase[] services = { new ReefAngelTCPRelayService() };
+                    ServiceBase.Run(services);
+                    rethrow = false;
+                }
+
+                
             }
-            Console.ReadKey();
+            catch (Exception ex)
+            {                
+                Console.Error.WriteLine(ex.Message);                
+            }
         }
     }
 }
