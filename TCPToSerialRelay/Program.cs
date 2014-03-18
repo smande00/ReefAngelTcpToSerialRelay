@@ -126,7 +126,7 @@ namespace TCPToSerialRelay
                     app.Shutdown();
                     Console.WriteLine("System stopped");
                 }
-                else 
+                else if(!install && !uninstall)
                 {
                     rethrow = true; // so that windows sees error...
                     ServiceBase[] services = { new ReefAngelTCPRelayService() };
